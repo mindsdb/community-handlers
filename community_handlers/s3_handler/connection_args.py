@@ -6,42 +6,52 @@ from mindsdb.integrations.libs.const import HANDLER_CONNECTION_ARG_TYPE as ARG_T
 connection_args = OrderedDict(
     aws_access_key_id={
         'type': ARG_TYPE.STR,
-        'description': 'The AWS access key that identifies the user or IAM role.',
+        'description': 'Access key for S3-compatible storage (AWS, DO Spaces, MinIO, R2, etc.).',
         'required': True,
-        'label': 'AWS Access Key'
+        'label': 'Access Key',
     },
     aws_secret_access_key={
         'type': ARG_TYPE.STR,
-        'description': 'The AWS secret access key that identifies the user or IAM role.',
+        'description': 'Secret access key for S3-compatible storage.',
         'secret': True,
         'required': True,
-        'label': 'AWS Secret Access Key'
+        'label': 'Secret Access Key',
     },
     bucket={
         'type': ARG_TYPE.STR,
-        'description': 'The name of the Amazon S3 bucket.',
+        'description': 'Name of the bucket / space.',
         'required': True,
-        'label': 'Amazon S3 Bucket'
+        'label': 'Bucket',
     },
     region_name={
         'type': ARG_TYPE.STR,
-        'description': 'The AWS region to connect to. Default is `us-east-1`.',
+        'description': 'Region. Required for non-AWS endpoints (DO Spaces, R2, etc.). Default us-east-1.',
         'required': False,
-        'label': 'AWS Region'
+        'label': 'Region',
+    },
+    endpoint_url={
+        'type': ARG_TYPE.STR,
+        'description': (
+            'Custom S3 endpoint URL for non-AWS providers. '
+            'Example: https://nyc3.digitaloceanspaces.com for DigitalOcean Spaces. '
+            'Leave blank for AWS S3.'
+        ),
+        'required': False,
+        'label': 'Endpoint URL',
     },
     aws_session_token={
         'type': ARG_TYPE.STR,
-        'description': 'The AWS session token that identifies the user or IAM role. This becomes necessary when using temporary security credentials.',
+        'description': 'Optional session token for temporary credentials.',
         'secret': True,
         'required': False,
-        'label': 'AWS Session Token'
-    }
+        'label': 'Session Token',
+    },
 )
 
 connection_args_example = OrderedDict(
-    aws_access_key_id='AQAXEQK89OX07YS34OP',
-    aws_secret_access_key='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-    aws_session_token='FQoGZXIvYXdzEHcaDmJjJj...',
-    region_name='us-east-2',
-    bucket='my-bucket',
+    aws_access_key_id='DO00XXXXXXXXXXXXXXXX',
+    aws_secret_access_key='...',
+    bucket='my-space',
+    region_name='nyc3',
+    endpoint_url='https://nyc3.digitaloceanspaces.com',
 )

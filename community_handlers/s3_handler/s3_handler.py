@@ -1,5 +1,6 @@
 from typing import List
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 import boto3
 import duckdb
@@ -72,22 +73,18 @@ class FileTable(APIResource):
 
 class S3Handler(APIHandler):
     """
-    This handler handles connection and execution of the SQL statements on AWS S3.
+    Handler for AWS S3 and S3-compatible object storage (DigitalOcean Spaces,
+    MinIO, Cloudflare R2, Backblaze B2, etc.).
+
+    Patched from upstream to accept an optional `endpoint_url` connection
+    argument that is propagated to both the boto3 client and the DuckDB
+    httpfs settings used for reads/writes.
     """
 
     name = "s3"
-    # TODO: Can other file formats be supported?
     supported_file_formats = ["csv", "tsv", "json", "parquet"]
 
     def __init__(self, name: Text, connection_data: Optional[Dict], **kwargs):
-        """
-        Initializes the handler.
-
-        Args:
-            name (Text): The name of the handler instance.
-            connection_data (Dict): The connection data required to connect to the AWS (S3) account.
-            kwargs: Arbitrary keyword arguments.
-        """
         super().__init__(name)
         self.connection_data = connection_data
         self.kwargs = kwargs
@@ -104,24 +101,16 @@ class S3Handler(APIHandler):
         if self.is_connected is True:
             self.disconnect()
 
+    def _has_custom_endpoint(self) -> bool:
+        return bool(self.connection_data.get("endpoint_url"))
+
     def connect(self):
-        """
-        Establishes a connection to the AWS (S3) account.
-
-        Raises:
-            ValueError: If the required connection parameters are not provided.
-
-        Returns:
-            boto3.client: A client object to the AWS (S3) account.
-        """
         if self.is_connected is True:
             return self.connection
 
-        # Validate mandatory parameters.
         if not all(key in self.connection_data for key in ["aws_access_key_id", "aws_secret_access_key"]):
             raise ValueError("Required parameters (aws_access_key_id, aws_secret_access_key) must be provided.")
 
-        # Connect to S3 and configure mandatory credentials.
         self.connection = self._connect_boto3()
         self.is_connected = True
 
@@ -129,14 +118,6 @@ class S3Handler(APIHandler):
 
     @contextmanager
     def _connect_duckdb(self, bucket):
-        """
-        Creates temporal duckdb database which is able to connect to the AWS (S3) account.
-        Have to be used as context manager
-
-        Returns:
-            DuckDBPyConnection
-        """
-        # Connect to S3 via DuckDB.
         duckdb_conn = duckdb.connect(":memory:")
         try:
             duckdb_conn.execute("INSTALL httpfs")
@@ -146,25 +127,39 @@ class S3Handler(APIHandler):
 
         duckdb_conn.execute("LOAD httpfs")
 
-        # Configure mandatory credentials.
         duckdb_conn.execute(f"SET s3_access_key_id='{self.connection_data['aws_access_key_id']}'")
         duckdb_conn.execute(f"SET s3_secret_access_key='{self.connection_data['aws_secret_access_key']}'")
 
-        # Configure optional parameters.
         if "aws_session_token" in self.connection_data:
             duckdb_conn.execute(f"SET s3_session_token='{self.connection_data['aws_session_token']}'")
 
-        # detect region for bucket
-        if bucket not in self._regions:
-            client = self.connect()
-            location = client.get_bucket_location(Bucket=bucket)["LocationConstraint"]
-            # AWS returns None for us-east-1 region (default/classic region)
-            if location is None:
-                location = "us-east-1"
-            self._regions[bucket] = location
+        if self._has_custom_endpoint():
+            # Non-AWS S3-compatible endpoint (DO Spaces, MinIO, R2, ...).
+            # Skip AWS-specific region autodetection (get_bucket_location is AWS-only).
+            parsed = urlparse(self.connection_data["endpoint_url"])
+            parsed = urlparse(self.connection_data["endpoint_url"])
+            if not parsed.netloc:  # schemeless input like 'minio:9000' or 'host.example.com:9000'
+                parsed = urlparse("//" + self.connection_data["endpoint_url"])
+            host = parsed.netloc or parsed.path
+            use_ssl = parsed.scheme == "https"  # default to no-SSL when scheme is absent
 
-        region = self._regions[bucket]
-        duckdb_conn.execute(f"SET s3_region='{region}'")
+            duckdb_conn.execute(f"SET s3_endpoint='{host}'")
+            duckdb_conn.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'}")
+            duckdb_conn.execute("SET s3_url_style='path'")
+
+            region = self.connection_data.get("region_name", "us-east-1")
+            duckdb_conn.execute(f"SET s3_region='{region}'")
+        else:
+            # AWS: detect bucket region via the S3 control plane.
+            if bucket not in self._regions:
+                client = self.connect()
+                location = client.get_bucket_location(Bucket=bucket)["LocationConstraint"]
+                if location is None:
+                    location = "us-east-1"
+                self._regions[bucket] = location
+
+            region = self._regions[bucket]
+            duckdb_conn.execute(f"SET s3_region='{region}'")
 
         try:
             yield duckdb_conn
@@ -172,54 +167,50 @@ class S3Handler(APIHandler):
             duckdb_conn.close()
 
     def _connect_boto3(self) -> boto3.client:
-        """
-        Establishes a connection to the AWS (S3) account.
-
-        Returns:
-            boto3.client: A client object to the AWS (S3) account.
-        """
-        # Configure mandatory credentials.
         config = {
             "aws_access_key_id": self.connection_data["aws_access_key_id"],
             "aws_secret_access_key": self.connection_data["aws_secret_access_key"],
         }
 
-        # Configure optional parameters.
-        optional_parameters = ["region_name", "aws_session_token"]
+        # boto3 accepts these kwargs natively; just pass through any that are set.
+        optional_parameters = ["region_name", "aws_session_token", "endpoint_url"]
         for parameter in optional_parameters:
-            if parameter in self.connection_data:
+            if parameter in self.connection_data and self.connection_data[parameter]:
                 config[parameter] = self.connection_data[parameter]
 
-        client = boto3.client("s3", **config, config=Config(signature_version="s3v4"))
+        boto_config = Config(signature_version="s3v4")
+        if self._has_custom_endpoint():
+            # Path-style addressing is required by DO Spaces, MinIO, etc.
+            boto_config = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 
-        # check connection
+        client = boto3.client("s3", **config, config=boto_config)
+
+        # Liveness check. head_bucket can return 403 on some providers even
+        # with valid credentials; fall back to list_objects_v2 in that case.
         if self.bucket is not None:
-            client.head_bucket(Bucket=self.bucket)
+            try:
+                client.head_bucket(Bucket=self.bucket)
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code in ("403", "AccessDenied", "Forbidden"):
+                    client.list_objects_v2(Bucket=self.bucket, MaxKeys=1)
+                else:
+                    raise
         else:
             client.list_buckets()
 
         return client
 
     def disconnect(self):
-        """
-        Closes the connection to the AWS (S3) account if it's currently open.
-        """
         if not self.is_connected:
             return
         self.connection.close()
         self.is_connected = False
 
     def check_connection(self) -> StatusResponse:
-        """
-        Checks the status of the connection to the S3 bucket.
-
-        Returns:
-            StatusResponse: An object containing the success status and an error message if an error occurs.
-        """
         response = StatusResponse(False)
         need_to_close = self.is_connected is False
 
-        # Check connection via boto3.
         try:
             self._connect_boto3()
             response.success = True
@@ -229,7 +220,6 @@ class S3Handler(APIHandler):
 
         if response.success and need_to_close:
             self.disconnect()
-
         elif not response.success and self.is_connected:
             self.is_connected = False
 
@@ -239,25 +229,17 @@ class S3Handler(APIHandler):
         if self.bucket is not None:
             return self.bucket, key
 
-        # get bucket from first part of the key
         ar = key.split("/")
         return ar[0], "/".join(ar[1:])
 
     def read_as_table(self, key) -> pd.DataFrame:
-        """
-        Read object as dataframe. Uses duckdb
-        """
         bucket, key = self._get_bucket(key)
 
         with self._connect_duckdb(bucket) as connection:
             cursor = connection.execute(f"SELECT * FROM 's3://{bucket}/{key}'")
-
             return cursor.fetchdf()
 
     def _read_as_content(self, key) -> None:
-        """
-        Read object as content
-        """
         bucket, key = self._get_bucket(key)
 
         client = self.connect()
@@ -267,14 +249,6 @@ class S3Handler(APIHandler):
         return content
 
     def add_data_to_table(self, key, df) -> None:
-        """
-        Writes the table to a file in the S3 bucket.
-
-        Raises:
-            CatalogException: If the table does not exist in the DuckDB connection.
-        """
-
-        # Check if the file exists in the S3 bucket.
         bucket, key = self._get_bucket(key)
 
         try:
@@ -285,29 +259,11 @@ class S3Handler(APIHandler):
             raise e
 
         with self._connect_duckdb(bucket) as connection:
-            # copy
             connection.execute(f"CREATE TABLE tmp_table AS SELECT * FROM 's3://{bucket}/{key}'")
-
-            # insert
             connection.execute("INSERT INTO tmp_table BY NAME SELECT * FROM df")
-
-            # upload
             connection.execute(f"COPY tmp_table TO 's3://{bucket}/{key}'")
 
     def query(self, query: ASTNode) -> Response:
-        """
-        Executes a SQL query represented by an ASTNode and retrieves the data.
-
-        Args:
-            query (ASTNode): An ASTNode representing the SQL query to be executed.
-
-        Raises:
-            ValueError: If the file format is not supported or the file does not exist in the S3 bucket.
-
-        Returns:
-            Response: A response object containing the result of the query or an error message.
-        """
-
         self.connect()
 
         if isinstance(query, Select):
@@ -317,7 +273,6 @@ class S3Handler(APIHandler):
                 table = self._files_table
                 df = table.select(query)
 
-                # add content
                 has_content = False
                 for target in query.targets:
                     if isinstance(target, Identifier) and target.parts[-1].lower() == "content":
@@ -346,15 +301,6 @@ class S3Handler(APIHandler):
         return response
 
     def native_query(self, query: str) -> Response:
-        """
-        Executes a SQL query and returns the result.
-
-        Args:
-            query (str): The SQL query to be executed.
-
-        Returns:
-            Response: A response object containing the result of the query or an error message.
-        """
         query_ast = parse_sql(query)
         return self.query(query_ast)
 
@@ -382,7 +328,6 @@ class S3Handler(APIHandler):
 
                 obj["Bucket"] = bucket
                 if add_bucket_to_name:
-                    # bucket is part of the name
                     obj["Key"] = f"{bucket}/{obj['Key']}"
                 objects.append(obj)
             if limit is not None and len(objects) >= limit:
@@ -391,58 +336,21 @@ class S3Handler(APIHandler):
         return objects
 
     def generate_sas_url(self, key: str, bucket: str) -> str:
-        """
-        Generates a pre-signed URL for accessing an object in the S3 bucket.
-
-        Args:
-            key (str): The key (path) of the object in the S3 bucket.
-            bucket (str): The name of the S3 bucket.
-
-        Returns:
-            str: The pre-signed URL for accessing the object.
-        """
         client = self.connect()
         url = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
         return url
 
     def get_tables(self) -> Response:
-        """
-        Retrieves a list of tables (objects) in the S3 bucket.
-
-        Each object is considered a table. Only the supported file formats are considered as tables.
-
-        Returns:
-            Response: A response object containing the list of tables and views, formatted as per the `Response` class.
-        """
-
-        # Get only the supported file formats.
-        # Wrap the object names with backticks to prevent SQL syntax errors.
         supported_names = [
             f"`{obj['Key']}`" for obj in self.get_objects() if obj["Key"].split(".")[-1] in self.supported_file_formats
         ]
-
-        # virtual table with list of files
         supported_names.insert(0, "files")
 
         response = Response(RESPONSE_TYPE.TABLE, data_frame=pd.DataFrame(supported_names, columns=["table_name"]))
-
         return response
 
     def get_columns(self, table_name: str) -> Response:
-        """
-        Retrieves column details for a specified table (object) in the S3 bucket.
-
-        Args:
-            table_name (Text): The name of the table for which to retrieve column information.
-
-        Raises:
-            ValueError: If the 'table_name' is not a valid string.
-
-        Returns:
-            Response: A response object containing the column details, formatted as per the `Response` class.
-        """
         query = Select(targets=[Star()], from_table=Identifier(parts=[table_name]), limit=Constant(1))
-
         result = self.query(query)
 
         response = Response(

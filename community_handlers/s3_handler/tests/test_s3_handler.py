@@ -9,7 +9,8 @@ class S3HandlerTest(unittest.TestCase):
         cls.kwargs = {
             "aws_access_key_id": "PCAQ2LJDOSWLNSQKOCPW",
             "aws_secret_access_key": "U/VjewPlNopsDmmwItl34r2neyC6WhZpUiip57i",
-            "region_name": "us-east-1",
+            "region_name": "nyc3",
+            "endpoint_url": "https://nyc3.digitaloceanspaces.com",
             "bucket": "mindsdb-bucket",
             "key": "iris.csv",
             "input_serialization": "{'CSV': {'FileHeaderInfo': 'NONE'}}"
