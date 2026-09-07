@@ -1,2 +1,2 @@
 __version__ = "0.1.0"
-__description__ = "Reddit stock sentiment from the Adanos Market Sentiment API."
+__description__ = "Adanos stock, crypto and text sentiment API."

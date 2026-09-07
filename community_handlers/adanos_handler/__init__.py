@@ -20,12 +20,21 @@ connection_args = OrderedDict(
 connection_args_example = {"api_key": "placeholder"}
 
 __all__ = [
-    "Handler", "name", "title", "type", "description", "version",
-    "icon_path", "connection_args", "connection_args_example", "import_error",
+    "Handler",
+    "name",
+    "title",
+    "type",
+    "description",
+    "version",
+    "icon_path",
+    "connection_args",
+    "connection_args_example",
+    "import_error",
 ]
 
 try:
     from .adanos_handler import AdanosHandler as Handler
+
     import_error = None
 except ImportError as exc:
     Handler = None

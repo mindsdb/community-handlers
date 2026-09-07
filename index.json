@@ -17,7 +17,7 @@
       "type": "data",
       "support_level": "community",
       "icon_path": "icon.svg",
-      "description": "Reddit stock sentiment from the Adanos Market Sentiment API."
+      "description": "Adanos stock, crypto and text sentiment API."
     },
     {
       "name": "aerospike",
