@@ -11,6 +11,15 @@
       "description": "MindsDB handler for Microsoft Access"
     },
     {
+      "name": "adanos",
+      "title": "Adanos",
+      "folder": "adanos_handler",
+      "type": "data",
+      "support_level": "community",
+      "icon_path": "icon.svg",
+      "description": "Adanos stock, crypto and text sentiment API."
+    },
+    {
       "name": "aerospike",
       "title": "Aerospike",
       "folder": "aerospike_handler",
